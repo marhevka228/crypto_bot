@@ -1,0 +1,99 @@
+import os
+import logging
+import requests
+import pandas as pd
+import re
+from bs4 import BeautifulSoup
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from dotenv import load_dotenv
+
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def extract_info_from_html(html, source_url):
+    soup = BeautifulSoup(html, 'html.parser')
+    text = soup.get_text()
+
+    emails = re.findall(r'[\w\.-]+@[\w\.-]+', text)
+    wallets = re.findall(r'0x[a-fA-F0-9]{40}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}', text)
+    socials = re.findall(r'https?://(?:t\.me|twitter\.com|discord\.gg|discord\.com|instagram\.com|facebook\.com|linkedin\.com|github\.com)/[\w\-\._]+', text)
+
+    rows = []
+    for e in set(emails):
+        rows.append({"Type": "Email", "Value": e, "Source": source_url})
+    for w in set(wallets):
+        rows.append({"Type": "Wallet", "Value": w, "Source": source_url})
+    for s in set(socials):
+        rows.append({"Type": "Social", "Value": s, "Source": source_url})
+    return rows
+
+def get_html_with_headers(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    response = requests.get(url, headers=headers, timeout=10)
+    response.raise_for_status()
+    return response.text
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Отправь мне одну или несколько ссылок (в столбик или через запятую), и я соберу email, кошельки и соцсети.")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "Вот что я умею:
+"
+        "/start — запустить бота
+"
+        "/help — список команд
+
+"
+        "Просто отправь одну или несколько ссылок, и я извлеку:
+"
+        "• Email-адреса
+"
+        "• Криптокошельки (ETH, BTC)
+"
+        "• Ссылки на Telegram, Twitter, Discord, GitHub и др.
+
+"
+        "Я верну CSV-файл с результатами."
+    )
+    await update.message.reply_text(help_text)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    raw_urls = re.split(r'[\s,]+', text)
+    urls = [u.strip() for u in raw_urls if u.startswith("http")]
+
+    all_rows = []
+
+    for url in urls:
+        try:
+            html = get_html_with_headers(url)
+            rows = extract_info_from_html(html, url)
+            all_rows.extend(rows)
+        except Exception as e:
+            logger.error(f"Ошибка с {url}: {e}")
+            all_rows.append({"Type": "Error", "Value": str(e), "Source": url})
+
+    if all_rows:
+        df = pd.DataFrame(all_rows)
+        file_path = "multi_parsed_data.csv"
+        df.to_csv(file_path, index=False)
+        await update.message.reply_document(document=open(file_path, 'rb'))
+    else:
+        await update.message.reply_text("Не удалось собрать данные с указанных ссылок.")
+
+def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
